@@ -24,6 +24,8 @@ import android.os.Build;
 import android.os.Bundle;
 import android.preference.PreferenceManager;
 import android.support.annotation.IntDef;
+import android.support.annotation.NonNull;
+import android.support.annotation.Nullable;
 import android.support.v4.app.NotificationCompat;
 import android.support.v4.app.TaskStackBuilder;
 import android.text.format.Time;
@@ -36,12 +38,20 @@ import com.example.android.sunshine.app.R;
 import com.example.android.sunshine.app.Utility;
 import com.example.android.sunshine.app.data.WeatherContract;
 import com.example.android.sunshine.app.muzei.WeatherMuzeiSource;
+import com.example.android.sunshine.app.wear.DataKeys;
+import com.google.android.gms.common.ConnectionResult;
+import com.google.android.gms.common.api.GoogleApiClient;
+import com.google.android.gms.wearable.Asset;
+import com.google.android.gms.wearable.DataMap;
+import com.google.android.gms.wearable.PutDataMapRequest;
+import com.google.android.gms.wearable.Wearable;
 
 import org.json.JSONArray;
 import org.json.JSONException;
 import org.json.JSONObject;
 
 import java.io.BufferedReader;
+import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.InputStreamReader;
@@ -52,7 +62,7 @@ import java.net.URL;
 import java.util.Vector;
 import java.util.concurrent.ExecutionException;
 
-public class SunshineSyncAdapter extends AbstractThreadedSyncAdapter {
+public class SunshineSyncAdapter extends AbstractThreadedSyncAdapter implements GoogleApiClient.ConnectionCallbacks, GoogleApiClient.OnConnectionFailedListener {
     public final String LOG_TAG = SunshineSyncAdapter.class.getSimpleName();
     public static final String ACTION_DATA_UPDATED =
             "com.example.android.sunshine.app.ACTION_DATA_UPDATED";
@@ -77,6 +87,7 @@ public class SunshineSyncAdapter extends AbstractThreadedSyncAdapter {
     private static final int INDEX_MIN_TEMP = 2;
     private static final int INDEX_SHORT_DESC = 3;
 
+
     @Retention(RetentionPolicy.SOURCE)
     @IntDef({LOCATION_STATUS_OK, LOCATION_STATUS_SERVER_DOWN, LOCATION_STATUS_SERVER_INVALID,  LOCATION_STATUS_UNKNOWN, LOCATION_STATUS_INVALID})
     public @interface LocationStatus {}
@@ -87,12 +98,31 @@ public class SunshineSyncAdapter extends AbstractThreadedSyncAdapter {
     public static final int LOCATION_STATUS_UNKNOWN = 3;
     public static final int LOCATION_STATUS_INVALID = 4;
 
+
+
+
+    String todayMax;
+    String todayMin;
+    int todayWeatherRes;
+
+
+    GoogleApiClient googleApiClient;
+
+
+
     public SunshineSyncAdapter(Context context, boolean autoInitialize) {
         super(context, autoInitialize);
     }
 
     @Override
     public void onPerformSync(Account account, Bundle extras, String authority, ContentProviderClient provider, SyncResult syncResult) {
+
+        googleApiClient = new GoogleApiClient.Builder(getContext())
+                            .addApi(Wearable.API).addConnectionCallbacks(this)
+                            .addOnConnectionFailedListener(this)
+                            .build();
+
+
         Log.d(LOG_TAG, "Starting sync");
 
         // We no longer need just the location String, but also potentially the latitude and
@@ -351,6 +381,8 @@ public class SunshineSyncAdapter extends AbstractThreadedSyncAdapter {
                 weatherValues.put(WeatherContract.WeatherEntry.COLUMN_SHORT_DESC, description);
                 weatherValues.put(WeatherContract.WeatherEntry.COLUMN_WEATHER_ID, weatherId);
 
+
+
                 cVVector.add(weatherValues);
             }
 
@@ -366,6 +398,7 @@ public class SunshineSyncAdapter extends AbstractThreadedSyncAdapter {
                         WeatherContract.WeatherEntry.COLUMN_DATE + " <= ?",
                         new String[] {Long.toString(dayTime.setJulianDay(julianStartDay-1))});
 
+                updateWearables(getContext());
                 updateWidgets();
                 updateMuzei();
                 notifyWeather();
@@ -379,6 +412,26 @@ public class SunshineSyncAdapter extends AbstractThreadedSyncAdapter {
             setLocationStatus(getContext(), LOCATION_STATUS_SERVER_INVALID);
         }
     }
+
+
+    private void updateWearables(Context context) {
+        Cursor cursor = getWeatherCursor(context);
+        if (cursor.moveToFirst()) {
+            todayMax =Utility.formatTemperature(getContext(),cursor.getDouble(INDEX_MAX_TEMP));
+            todayMin = Utility.formatTemperature(getContext(),cursor.getDouble(INDEX_MIN_TEMP));
+            int weatherId = cursor.getInt(INDEX_WEATHER_ID);
+            todayWeatherRes =  Utility.getArtResourceForWeatherCondition(weatherId);
+
+            googleApiClient.connect();
+        }
+    }
+
+    private Cursor getWeatherCursor(Context context) {
+        String locationQuery = Utility.getPreferredLocation(context);
+        Uri weatherUri = WeatherContract.WeatherEntry.buildWeatherLocationWithDate(locationQuery, System.currentTimeMillis());
+        return context.getContentResolver().query(weatherUri, NOTIFY_WEATHER_PROJECTION, null, null, null);
+    }
+
 
     private void updateWidgets() {
         Context context = getContext();
@@ -658,4 +711,43 @@ public class SunshineSyncAdapter extends AbstractThreadedSyncAdapter {
         spe.putInt(c.getString(R.string.pref_location_status_key), locationStatus);
         spe.commit();
     }
+
+
+
+
+
+    @Override
+    public void onConnected(@Nullable Bundle bundle) {
+
+        PutDataMapRequest mapRequest = PutDataMapRequest.create(DataKeys.DATA_WEATHER+System.currentTimeMillis());
+        DataMap dataMap = mapRequest.getDataMap();
+        dataMap.putString(DataKeys.MIN, todayMin);
+        dataMap.putString(DataKeys.MAX , todayMax);
+
+        Asset asset = createAssetFromBitmap(BitmapFactory.decodeResource(getContext().getResources(),todayWeatherRes));
+
+        dataMap.putAsset(DataKeys.ICON,asset);
+
+        Wearable.DataApi.putDataItem(googleApiClient,mapRequest.asPutDataRequest().setUrgent());
+
+
+    }
+
+    private Asset createAssetFromBitmap(Bitmap bitmap) {
+        final ByteArrayOutputStream byteStream = new ByteArrayOutputStream();
+        bitmap.compress(Bitmap.CompressFormat.PNG, 100, byteStream);
+        return Asset.createFromBytes(byteStream.toByteArray());
+    }
+
+    @Override
+    public void onConnectionSuspended(int i) {
+
+    }
+
+    @Override
+    public void onConnectionFailed(@NonNull ConnectionResult connectionResult) {
+
+    }
+
+
 }
